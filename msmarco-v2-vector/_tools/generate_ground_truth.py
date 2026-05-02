@@ -212,8 +212,11 @@ def stream_dataset_batched(doc_count, num_workers, batch_size):
 
 def stream_dataset_arrow(doc_count, num_workers, batch_size):
     """
-    Most efficient: iterate Arrow batches directly, avoiding per-row Python overhead.
-    Falls back to stream_dataset_batched if Arrow access is unavailable.
+    Load the dataset, then yield batches by slicing the underlying Arrow table
+    directly — avoids the expensive ds.select() per-batch overhead.
+
+    Vectors are extracted by flattening the Arrow list column into a single
+    contiguous float array, then reshaping — much faster than per-row conversion.
     """
     from datasets import load_dataset
 
@@ -227,12 +230,16 @@ def stream_dataset_arrow(doc_count, num_workers, batch_size):
     )
     print(f"Dataset loaded in {time.time() - t0:.1f}s  ({len(ds):,} rows)")
 
-    total = len(ds)
+    table = ds.data  # pyarrow.Table — zero-copy access to backing data
+    total = table.num_rows
     for start in range(0, total, batch_size):
         end = min(start + batch_size, total)
-        slice_ds = ds.select(range(start, end))
-        doc_ids = slice_ds["_id"]
-        vecs = np.array(slice_ds["emb"], dtype=np.float32)
+        chunk = table.slice(start, end - start)
+        doc_ids = chunk.column("_id").to_pylist()
+        emb_col = chunk.column("emb")
+        flat = emb_col.values.to_numpy(zero_copy_only=False).astype(np.float32)
+        n_rows = end - start
+        vecs = flat.reshape(n_rows, -1)
         normalize_rows(vecs)
         yield doc_ids, vecs
 
