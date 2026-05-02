@@ -101,7 +101,9 @@ an hour regardless.
 ### Running the Generation
 
 ```bash
-# On the AWS instance:
+# On the AWS instance — create an isolated Python environment:
+python3 -m venv ground-truth-env
+source ground-truth-env/bin/activate
 pip install datasets numpy huggingface_hub
 
 # 18M ground truth (~15-25 min)
@@ -117,6 +119,10 @@ python _tools/generate_ground_truth.py \
     --output queries-recall-36m.json \
     --workers 8
 bzip2 queries-recall-36m.json
+
+# Clean up when done
+deactivate
+rm -rf ground-truth-env
 ```
 
 ### Validation

@@ -7,6 +7,11 @@ vectors from the Hugging Face Cohere/msmarco-v2-embed-english-v3 dataset, comput
 exact dot-product similarities, and writes per-query top-K nearest neighbors in the
 format expected by the Rally track's KnnRecallRunner.
 
+Setup:
+    python3 -m venv ground-truth-env
+    source ground-truth-env/bin/activate
+    pip install datasets numpy huggingface_hub
+
 Usage:
     python generate_ground_truth.py --doc-count 18000000 --output queries-recall-18m.json
     python generate_ground_truth.py --doc-count 36000000 --output queries-recall-36m.json
@@ -127,7 +132,7 @@ def process_batch_fast(query_matrix, doc_ids_batch, doc_vecs_batch, heaps, top_k
             threshold = heap[0][0]
 
 
-def stream_dataset(doc_count, num_workers):
+def stream_dataset(doc_count, num_workers, batch_size):
     """
     Stream (doc_id, embedding) pairs from the Hugging Face dataset.
     Uses datasets library with streaming to avoid downloading the full dataset.
@@ -151,7 +156,7 @@ def stream_dataset(doc_count, num_workers):
         batch_ids.append(doc["_id"])
         batch_vecs.append(emb)
 
-        if len(batch_ids) == BATCH_SIZE:
+        if len(batch_ids) == batch_size:
             yield batch_ids, np.stack(batch_vecs)
             batch_ids = []
             batch_vecs = []
@@ -160,7 +165,7 @@ def stream_dataset(doc_count, num_workers):
         yield batch_ids, np.stack(batch_vecs)
 
 
-def stream_dataset_batched(doc_count, num_workers):
+def stream_dataset_batched(doc_count, num_workers, batch_size):
     """
     Faster alternative using datasets batch iteration and Arrow-native column access.
     """
@@ -177,8 +182,8 @@ def stream_dataset_batched(doc_count, num_workers):
     print(f"Dataset loaded in {time.time() - t0:.1f}s")
 
     total = len(ds)
-    for start in range(0, total, BATCH_SIZE):
-        end = min(start + BATCH_SIZE, total)
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
         batch = ds[start:end]
         doc_ids = [ds[i]["_id"] for i in range(start, end)]
         vecs = np.array(batch["emb"], dtype=np.float32)
@@ -186,7 +191,7 @@ def stream_dataset_batched(doc_count, num_workers):
         yield doc_ids, vecs
 
 
-def stream_dataset_arrow(doc_count, num_workers):
+def stream_dataset_arrow(doc_count, num_workers, batch_size):
     """
     Most efficient: iterate Arrow batches directly, avoiding per-row Python overhead.
     Falls back to stream_dataset_batched if Arrow access is unavailable.
@@ -204,8 +209,8 @@ def stream_dataset_arrow(doc_count, num_workers):
     print(f"Dataset loaded in {time.time() - t0:.1f}s  ({len(ds):,} rows)")
 
     total = len(ds)
-    for start in range(0, total, BATCH_SIZE):
-        end = min(start + BATCH_SIZE, total)
+    for start in range(0, total, batch_size):
+        end = min(start + batch_size, total)
         slice_ds = ds.select(range(start, end))
         doc_ids = slice_ds["_id"]
         vecs = np.array(slice_ds["emb"], dtype=np.float32)
@@ -255,8 +260,7 @@ def main():
     )
     args = parser.parse_args()
 
-    global BATCH_SIZE
-    BATCH_SIZE = args.batch_size
+    batch_size = args.batch_size
 
     queries = load_queries()
     query_matrix = build_query_matrix(queries)
@@ -266,18 +270,18 @@ def main():
 
     print(f"Computing top-{args.top_k} neighbors for {n_queries} queries "
           f"over {args.doc_count:,} documents ...")
-    print(f"Batch size: {BATCH_SIZE:,}, Workers: {args.workers}")
+    print(f"Batch size: {batch_size:,}, Workers: {args.workers}")
 
     docs_processed = 0
     t_start = time.time()
     t_last = t_start
 
-    for doc_ids_batch, doc_vecs_batch in stream_dataset_arrow(args.doc_count, args.workers):
+    for doc_ids_batch, doc_vecs_batch in stream_dataset_arrow(args.doc_count, args.workers, batch_size):
         process_batch_fast(query_matrix, doc_ids_batch, doc_vecs_batch, heaps, args.top_k)
         docs_processed += len(doc_ids_batch)
 
         now = time.time()
-        if docs_processed % PROGRESS_INTERVAL < BATCH_SIZE or docs_processed == args.doc_count:
+        if docs_processed % PROGRESS_INTERVAL < batch_size or docs_processed == args.doc_count:
             elapsed = now - t_start
             rate = docs_processed / elapsed if elapsed > 0 else 0
             eta = (args.doc_count - docs_processed) / rate if rate > 0 else 0
