@@ -31,7 +31,6 @@ AWS instance recommendation:
 
 import argparse
 import bz2
-import heapq
 import json
 import os
 import sys
@@ -49,9 +48,15 @@ BATCH_SIZE = 50_000
 PROGRESS_INTERVAL = 500_000
 
 
-def sigmoid_score(dot_product):
+def sigmoid_score(dot_product, out=None):
     """Replicate ES script_score: sigmoid(1, Math.E, -dotProduct(q, d))"""
-    return 1.0 / (1.0 + np.exp(-dot_product))
+    if out is None:
+        return 1.0 / (1.0 + np.exp(-dot_product))
+    np.negative(dot_product, out=out)
+    np.exp(out, out=out)
+    out += 1.0
+    np.reciprocal(out, out=out)
+    return out
 
 
 def load_queries():
@@ -79,57 +84,71 @@ def normalize_rows(matrix):
     return matrix
 
 
-def process_batch(query_matrix, doc_ids_batch, doc_vecs_batch, heaps, top_k):
+class TopKAccumulator:
     """
-    Compute dot products for a batch of document vectors against all queries,
-    and maintain per-query min-heaps of size top_k.
-
-    query_matrix: (n_queries, dims) float32
-    doc_vecs_batch: (batch_size, dims) float32
-    doc_ids_batch: list of str, length batch_size
-    heaps: list of min-heaps (one per query), each element is (score, doc_id)
+    Maintains per-query top-K results using numpy arrays.  Merges each batch
+    with argpartition — no Python-level per-document loops.
     """
-    scores = query_matrix @ doc_vecs_batch.T  # (n_queries, batch_size)
-    scores = sigmoid_score(scores)
 
-    n_queries = scores.shape[0]
-    for qi in range(n_queries):
-        row = scores[qi]
-        heap = heaps[qi]
-        for di in range(len(doc_ids_batch)):
-            s = float(row[di])
-            if len(heap) < top_k:
-                heapq.heappush(heap, (s, doc_ids_batch[di]))
-            elif s > heap[0][0]:
-                heapq.heapreplace(heap, (s, doc_ids_batch[di]))
+    def __init__(self, n_queries, top_k):
+        self.n_queries = n_queries
+        self.top_k = top_k
+        self.scores = np.full((n_queries, top_k), -np.inf, dtype=np.float64)
+        self.doc_ids = np.empty((n_queries, top_k), dtype=object)
+        self.filled = 0  # how many columns have real data (0..top_k)
 
+    def add_batch(self, query_matrix, doc_ids_batch, doc_vecs_batch):
+        """
+        query_matrix: (n_queries, dims) float32
+        doc_vecs_batch: (batch_size, dims) float32
+        doc_ids_batch: list of str, length batch_size
+        """
+        batch_scores = query_matrix @ doc_vecs_batch.T  # (n_queries, batch_size)
+        sigmoid_score(batch_scores, out=batch_scores)
+        batch_size = batch_scores.shape[1]
+        doc_ids_arr = np.array(doc_ids_batch, dtype=object)
 
-def process_batch_fast(query_matrix, doc_ids_batch, doc_vecs_batch, heaps, top_k):
-    """
-    Optimized version: pre-filter with numpy to avoid Python-level iteration
-    over every (query, doc) pair.  For each query, only push docs whose score
-    exceeds the current heap minimum.
-    """
-    scores = query_matrix @ doc_vecs_batch.T  # (n_queries, batch_size)
-    scores = sigmoid_score(scores)
+        if self.filled < self.top_k:
+            take = min(batch_size, self.top_k - self.filled)
+            end = self.filled + take
+            self.scores[:, self.filled:end] = batch_scores[:, :take]
+            self.doc_ids[:, self.filled:end] = doc_ids_arr[:take]
+            self.filled = end
+            if take < batch_size:
+                remaining_scores = batch_scores[:, take:]
+                remaining_ids = doc_ids_arr[take:]
+                self._merge(remaining_scores, remaining_ids)
+            return
 
-    n_queries = scores.shape[0]
-    for qi in range(n_queries):
-        row = scores[qi]
-        heap = heaps[qi]
+        self._merge(batch_scores, doc_ids_arr)
 
-        if len(heap) < top_k:
-            for di in range(len(doc_ids_batch)):
-                heapq.heappush(heap, (float(row[di]), doc_ids_batch[di]))
-                if len(heap) > top_k:
-                    heapq.heappop(heap)
-            continue
+    def _merge(self, batch_scores, doc_ids_arr):
+        """Merge batch results with current top-K using argpartition."""
+        k = self.top_k
+        combined_scores = np.concatenate([self.scores, batch_scores], axis=1)
 
-        threshold = heap[0][0]
-        candidates = np.where(row > threshold)[0]
-        for di in candidates:
-            heapq.heapreplace(heap, (float(row[di]), doc_ids_batch[di]))
-            threshold = heap[0][0]
+        batch_ids_2d = np.tile(doc_ids_arr, (self.n_queries, 1))
+        combined_ids = np.concatenate([self.doc_ids, batch_ids_2d], axis=1)
+
+        n_total = combined_scores.shape[1]
+        top_k_indices = np.argpartition(combined_scores, n_total - k, axis=1)[:, -k:]
+
+        rows = np.arange(self.n_queries)[:, None]
+        self.scores = combined_scores[rows, top_k_indices].copy()
+        self.doc_ids = combined_ids[rows, top_k_indices].copy()
+
+    def get_results(self):
+        """Return list of (doc_id, score) lists, sorted descending by score."""
+        results = []
+        for qi in range(self.n_queries):
+            order = np.argsort(-self.scores[qi])
+            items = [
+                [str(self.doc_ids[qi, idx]), round(float(self.scores[qi, idx]), 7)]
+                for idx in order
+                if self.scores[qi, idx] > -np.inf
+            ]
+            results.append(items)
+        return results
 
 
 def stream_dataset(doc_count, num_workers, batch_size):
@@ -218,17 +237,16 @@ def stream_dataset_arrow(doc_count, num_workers, batch_size):
         yield doc_ids, vecs
 
 
-def write_output(queries, heaps, output_path):
+def write_output(queries, accumulator, output_path):
     """Write ground truth JSONL matching the format of queries-recall.json.bz2."""
+    all_results = accumulator.get_results()
     with open(output_path, "w") as f:
         for qi, q in enumerate(queries):
-            top_items = sorted(heaps[qi], key=lambda x: -x[0])
-            ids = [[doc_id, round(score, 7)] for score, doc_id in top_items]
             line = {
                 "query_id": q["query_id"],
                 "text": q["text"],
                 "emb": q["emb"],
-                "ids": ids,
+                "ids": all_results[qi],
             }
             f.write(json.dumps(line) + "\n")
     print(f"Wrote {len(queries)} queries to {output_path}")
@@ -266,7 +284,7 @@ def main():
     query_matrix = build_query_matrix(queries)
     n_queries = len(queries)
 
-    heaps = [[] for _ in range(n_queries)]
+    accumulator = TopKAccumulator(n_queries, args.top_k)
 
     print(f"Computing top-{args.top_k} neighbors for {n_queries} queries "
           f"over {args.doc_count:,} documents ...")
@@ -274,15 +292,13 @@ def main():
 
     docs_processed = 0
     t_start = time.time()
-    t_last = t_start
 
     for doc_ids_batch, doc_vecs_batch in stream_dataset_arrow(args.doc_count, args.workers, batch_size):
-        process_batch_fast(query_matrix, doc_ids_batch, doc_vecs_batch, heaps, args.top_k)
+        accumulator.add_batch(query_matrix, doc_ids_batch, doc_vecs_batch)
         docs_processed += len(doc_ids_batch)
 
-        now = time.time()
         if docs_processed % PROGRESS_INTERVAL < batch_size or docs_processed == args.doc_count:
-            elapsed = now - t_start
+            elapsed = time.time() - t_start
             rate = docs_processed / elapsed if elapsed > 0 else 0
             eta = (args.doc_count - docs_processed) / rate if rate > 0 else 0
             print(f"  {docs_processed:>12,} / {args.doc_count:,} docs  "
@@ -293,7 +309,7 @@ def main():
     print(f"Brute-force search completed in {elapsed:.1f}s "
           f"({docs_processed/elapsed:,.0f} docs/s)")
 
-    write_output(queries, heaps, args.output)
+    write_output(queries, accumulator, args.output)
     print(f"Done. Compress with:  bzip2 {args.output}")
 
 

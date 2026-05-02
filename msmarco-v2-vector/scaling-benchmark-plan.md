@@ -28,7 +28,7 @@ documents are in the index.
 
 | File                         | Corpus size | Top-K per query | Queries |
 |------------------------------|-------------|-----------------|---------|
-| `queries-recall.json.bz2`   | Full (138M) | 1000            | 76      |
+| `queries-recall.json.bz2`    | Full (138M) | 1000            | 76      |
 | `queries-recall-10m.json.bz2`| 10M         | 100             | 76      |
 
 **New ground truth files to generate:**
@@ -48,6 +48,29 @@ corpus ground truth).  For 72M this means recall is measured against the full
 acceptable since the 72M index contains roughly half the full corpus and true
 neighbors are a subset.  Alternatively, the 72M tier can skip recall if the
 18M and 36M data points plus the full dataset are sufficient.
+
+### Document ordering: why HuggingFace slicing matches Rally ingestion
+
+The ground truth script uses `train[:N]` on the HuggingFace dataset, while
+Rally ingests from pre-built corpus files.  These produce the same document
+set because:
+
+1. **Corpus file generation** (`_tools/parse_documents.py`) slices the HF
+   `train` split sequentially: `train[0:3M]` → file 01, `train[3M:6M]` →
+   file 02, etc.
+2. **Rally's bulk operation** reads corpus files in the order listed in the
+   `corpora` array (01, 02, 03...) and reads documents sequentially within
+   each file.  `ingest-doc-count` is a global total that simply stops the
+   sequential read after N documents (see `PartitionBulkIndexParamSource` in
+   Rally's `esrally/track/params.py`).
+3. **`generate_ground_truth.py`** uses `train[:N]` which is `train[0:N]` —
+   the same first N documents from HuggingFace, in the same order.
+
+For both subset tiers the doc count equals the total docs in the listed
+corpora (18M = 6 files × 3M in group 1; 36M = 12 files × 3M in groups 1–2),
+so Rally ingests every document in those corpus groups with no partial file
+reads.  The ground truth and the indexed data will contain identical document
+sets.
 
 ## Ground Truth Generation
 
@@ -106,15 +129,22 @@ python3 -m venv ground-truth-env
 source ground-truth-env/bin/activate
 pip install datasets numpy huggingface_hub
 
+# Point the HuggingFace cache to a disk with enough space.
+# load_dataset downloads all parquet shards (~500 GB+) before selecting rows,
+# and the default cache (~/.cache/huggingface/) is often on a small root
+# filesystem.  Set these to a path on your large data volume:
+export HF_HOME=/home/esbench/.rally/hf_cache
+export HF_DATASETS_CACHE=/home/esbench/.rally/hf_cache/datasets
+
 # 18M ground truth (~15-25 min)
-python _tools/generate_ground_truth.py \
+python msmarco-v2-vector/_tools/generate_ground_truth.py \
     --doc-count 18000000 \
     --output queries-recall-18m.json \
     --workers 8
 bzip2 queries-recall-18m.json
 
 # 36M ground truth (~25-45 min)
-python _tools/generate_ground_truth.py \
+python msmarco-v2-vector/_tools/generate_ground_truth.py \
     --doc-count 36000000 \
     --output queries-recall-36m.json \
     --workers 8
@@ -123,6 +153,7 @@ bzip2 queries-recall-36m.json
 # Clean up when done
 deactivate
 rm -rf ground-truth-env
+rm -rf /home/esbench/.rally/hf_cache
 ```
 
 ### Validation
