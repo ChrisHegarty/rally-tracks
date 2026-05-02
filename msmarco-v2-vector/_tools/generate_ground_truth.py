@@ -236,7 +236,7 @@ def stream_dataset_arrow(doc_count, num_workers, batch_size):
         end = min(start + batch_size, total)
         chunk = table.slice(start, end - start)
         doc_ids = chunk.column("_id").to_pylist()
-        emb_col = chunk.column("emb")
+        emb_col = chunk.column("emb").combine_chunks()
         flat = emb_col.values.to_numpy(zero_copy_only=False).astype(np.float32)
         n_rows = end - start
         vecs = flat.reshape(n_rows, -1)
