@@ -71,9 +71,15 @@ def load_queries():
 
 
 def build_query_matrix(queries):
-    """Stack query embeddings into a (n_queries, dims) float32 matrix."""
+    """Stack query embeddings into a (n_queries, dims) float64 matrix.
+
+    float64 matches Java double precision used by ES script_score, reducing
+    tie-break differences at score boundaries.  The (76, 1024) matrix is tiny
+    so the memory cost is negligible, and numpy auto-promotes the matmul result
+    to float64 when multiplied with float32 document vectors.
+    """
     embs = [q["emb"] for q in queries]
-    return np.array(embs, dtype=np.float32)
+    return np.array(embs, dtype=np.float64)
 
 
 def normalize_rows(matrix):
