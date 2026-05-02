@@ -81,6 +81,10 @@
   "include-in-reporting": false,
   {%- if initial_indexing_ingest_doc_count is defined and initial_indexing_ingest_doc_count | int == 10000000 -%}
     "recall-doc-set": "10m"
+  {%- elif initial_indexing_ingest_doc_count is defined and initial_indexing_ingest_doc_count | int == 18000000 -%}
+    "recall-doc-set": "18m"
+  {%- elif initial_indexing_ingest_doc_count is defined and initial_indexing_ingest_doc_count | int == 36000000 -%}
+    "recall-doc-set": "36m"
   {%- else -%}
     "recall-doc-set": "full"
   {%- endif -%}
