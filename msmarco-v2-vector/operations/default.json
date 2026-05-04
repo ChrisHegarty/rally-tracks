@@ -85,6 +85,8 @@
     "recall-doc-set": "18m"
   {%- elif initial_indexing_ingest_doc_count is defined and initial_indexing_ingest_doc_count | int == 36000000 -%}
     "recall-doc-set": "36m"
+  {%- elif initial_indexing_ingest_doc_count is defined and initial_indexing_ingest_doc_count | int == 72000000 -%}
+    "recall-doc-set": "72m"
   {%- else -%}
     "recall-doc-set": "full"
   {%- endif -%}

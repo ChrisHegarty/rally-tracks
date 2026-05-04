@@ -33,7 +33,6 @@ import argparse
 import bz2
 import json
 import os
-import sys
 import time
 
 import numpy as np
@@ -155,65 +154,6 @@ class TopKAccumulator:
             ]
             results.append(items)
         return results
-
-
-def stream_dataset(doc_count, num_workers, batch_size):
-    """
-    Stream (doc_id, embedding) pairs from the Hugging Face dataset.
-    Uses datasets library with streaming to avoid downloading the full dataset.
-    """
-    from datasets import load_dataset
-
-    ds = load_dataset(
-        DATASET_NAME,
-        split=f"train[:{doc_count}]",
-        num_proc=num_workers if num_workers > 1 else None,
-    )
-
-    batch_ids = []
-    batch_vecs = []
-
-    for doc in ds:
-        emb = np.array(doc["emb"], dtype=np.float32)
-        norm = np.linalg.norm(emb)
-        if norm > 0:
-            emb /= norm
-        batch_ids.append(doc["_id"])
-        batch_vecs.append(emb)
-
-        if len(batch_ids) == batch_size:
-            yield batch_ids, np.stack(batch_vecs)
-            batch_ids = []
-            batch_vecs = []
-
-    if batch_ids:
-        yield batch_ids, np.stack(batch_vecs)
-
-
-def stream_dataset_batched(doc_count, num_workers, batch_size):
-    """
-    Faster alternative using datasets batch iteration and Arrow-native column access.
-    """
-    from datasets import load_dataset
-
-    print(f"Loading dataset split train[:{doc_count}] ...")
-    t0 = time.time()
-    ds = load_dataset(
-        DATASET_NAME,
-        split=f"train[:{doc_count}]",
-        num_proc=num_workers if num_workers > 1 else None,
-    )
-    ds.set_format("numpy", columns=["emb"])
-    print(f"Dataset loaded in {time.time() - t0:.1f}s")
-
-    total = len(ds)
-    for start in range(0, total, batch_size):
-        end = min(start + batch_size, total)
-        batch = ds[start:end]
-        doc_ids = [ds[i]["_id"] for i in range(start, end)]
-        vecs = np.array(batch["emb"], dtype=np.float32)
-        normalize_rows(vecs)
-        yield doc_ids, vecs
 
 
 def stream_dataset_arrow(doc_count, num_workers, batch_size):

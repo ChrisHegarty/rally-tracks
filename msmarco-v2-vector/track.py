@@ -19,6 +19,7 @@ QUERIES_RECALL_FILENAME: str = "queries-recall.json.bz2"
 QUERIES_RECALL_10M_FILENAME: str = "queries-recall-10m.json.bz2"
 QUERIES_RECALL_18M_FILENAME: str = "queries-recall-18m.json.bz2"
 QUERIES_RECALL_36M_FILENAME: str = "queries-recall-36m.json.bz2"
+QUERIES_RECALL_72M_FILENAME: str = "queries-recall-72m.json.bz2"
 
 
 def extract_vector_operations_count(knn_result):
@@ -176,6 +177,7 @@ class KnnRecallRunner:
             "10m": QUERIES_RECALL_10M_FILENAME,
             "18m": QUERIES_RECALL_18M_FILENAME,
             "36m": QUERIES_RECALL_36M_FILENAME,
+            "72m": QUERIES_RECALL_72M_FILENAME,
         }
         queries_recall = recall_file_map.get(recall_doc_set, QUERIES_RECALL_FILENAME)
         logger.info(f"recall_doc_set={recall_doc_set!r} (type={type(recall_doc_set).__name__}), using recall file: {queries_recall}")
